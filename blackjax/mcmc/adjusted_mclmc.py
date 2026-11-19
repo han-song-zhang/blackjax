@@ -16,8 +16,10 @@
 NOTE: For best performance, we recommend using adjusted_mclmc_dynamic instead of this module, which is primarily intended for use in parallelized versions of the algorithm.
 
 """
+
 import warnings
-from typing import Callable
+from collections.abc import Callable
+from typing import cast
 
 import jax
 import jax.numpy as jnp
@@ -47,7 +49,9 @@ def init(position: ArrayLikeTree, logdensity_fn: Callable) -> HMCState:
     The initial HMCState.
     """
     logdensity, logdensity_grad = jax.value_and_grad(logdensity_fn)(position)
-    return HMCState(position, logdensity, logdensity_grad)
+    # position is stored unconverted, like hmc.init; build_kernel below
+    # re-feeds HMCState.position straight into an IntegratorState.
+    return HMCState(cast(ArrayTree, position), logdensity, logdensity_grad)
 
 
 def build_kernel(
@@ -212,8 +216,6 @@ def adjusted_mclmc_proposal(
     ----------
     integrator
         integrator used to build the trajectory step by step.
-    kinetic_energy
-        Function that computes the kinetic energy.
     step_size
         Size of the integration step.
     num_integration_steps

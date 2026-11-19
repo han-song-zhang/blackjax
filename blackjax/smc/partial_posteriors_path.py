@@ -1,4 +1,5 @@
-from typing import Callable, NamedTuple
+from collections.abc import Callable
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
@@ -21,7 +22,7 @@ class PartialPosteriorsSMCState(NamedTuple):
         in the computation of the observed likelihood.
     """
 
-    particles: ArrayTree
+    particles: ArrayLikeTree
     weights: Array
     data_mask: Array
 
@@ -90,8 +91,14 @@ def build_kernel(
         def log_weights_fn(x):
             return logposterior_fn(x) - previous_logposterior_fn(x)
 
+        # Mutation precedes reweighting, so preserve the previous target.
         state, info = delegate(
-            key, state, num_mcmc_steps, mcmc_parameters, logposterior_fn, log_weights_fn
+            key,
+            state,
+            num_mcmc_steps,
+            mcmc_parameters,
+            previous_logposterior_fn,
+            log_weights_fn,
         )
 
         return (

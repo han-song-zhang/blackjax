@@ -5,12 +5,16 @@ import chex
 import jax
 import jax.numpy as jnp
 import jax.scipy.stats as stats
+import numpy as np
 from absl.testing import absltest, parameterized
+from jax.flatten_util import ravel_pytree
+from scipy import stats as scipy_stats
 
 import blackjax
 from blackjax.mcmc import metrics
-from blackjax.mcmc.barker import _barker_pdf, _barker_sample
+from blackjax.mcmc.barker import _barker_pdf, _barker_sample, _log1pexp
 from blackjax.util import run_inference_algorithm
+from tests.fixtures import std_normal_logdensity
 
 
 class BarkerSamplingTest(chex.TestCase):
@@ -60,6 +64,53 @@ def _test_samples_vs_pdf(samples, pdf):
 
 
 class BarkerPreconditioiningTest(chex.TestCase):
+    @parameterized.parameters(
+        itertools.product([0.5, 1.0, 2.0], [True, False], [True, False])
+    )
+    def test_riemannian_acceptance_probability(self, step_size, diagonal, pytree):
+        """The acceptance ratio includes the position-dependent Gaussian base."""
+        covariance = np.array([[1.0, 0.3], [0.3, 1.5]])
+        if diagonal:
+            covariance = np.diag(np.diag(covariance))
+
+        def mass_matrix(position):
+            flat_position, _ = ravel_pytree(position)
+            mass = jnp.asarray(covariance) / (1 + jnp.sum(flat_position**2))
+            return jnp.diag(mass) if diagonal else mass
+
+        def proposal_logpdf(destination, origin):
+            mass = covariance / (1 + origin @ origin)
+            cholesky = np.linalg.cholesky(mass)
+            displacement = np.linalg.solve(cholesky, destination - origin)
+            gradient = cholesky.T @ (-origin)
+            return (
+                scipy_stats.multivariate_normal.logpdf(
+                    destination, mean=origin, cov=step_size**2 * mass
+                )
+                + origin.size * np.log(2)
+                - np.logaddexp(0, -displacement * gradient).sum()
+            )
+
+        position = (
+            {"a": jnp.array(1.0), "b": jnp.array([-0.5])}
+            if pytree
+            else jnp.array([1.0, -0.5])
+        )
+        sampler = blackjax.barker(std_normal_logdensity, step_size, mass_matrix)
+        state = sampler.init(position)
+        step = jax.jit(sampler.step)
+        x = np.asarray(ravel_pytree(position)[0], dtype=np.float64)
+        for seed in (2, 5):
+            _, info = step(jax.random.key(seed), state)
+            y = np.asarray(ravel_pytree(info.proposal.position)[0], dtype=np.float64)
+            log_ratio = (
+                -0.5 * (y @ y - x @ x) + proposal_logpdf(x, y) - proposal_logpdf(y, x)
+            )
+            expected = np.exp(min(0.0, log_ratio))
+            chex.assert_trees_all_close(
+                info.acceptance_rate, expected, atol=1e-6, rtol=1e-6
+            )
+
     @parameterized.parameters([1234, 5678])
     def test_preconditioning_matrix(self, seed):
         """Test two different ways of using pre-conditioning matrix has exactly same effect.
@@ -173,6 +224,56 @@ class BarkerPreconditioiningTest(chex.TestCase):
         chex.assert_trees_all_close(
             jnp.cov(samples.T), jnp.eye(2), atol=1e-1, rtol=1e-1
         )
+
+
+class BarkerNumericalStabilityTest(chex.TestCase):
+    @parameterized.product(dtype=[jnp.float32, jnp.float64], use_jit=[False, True])
+    def test_log1pexp_values_and_gradients(self, dtype, use_jit):
+        with jax.enable_x64(dtype == jnp.float64):
+            values = jnp.array(
+                [-1000.0, -100.0, -1.0, 0.0, 1.0, 100.0, 1000.0], dtype=dtype
+            )
+            value_and_grad = jax.value_and_grad(lambda x: _log1pexp(x).sum())
+            if use_jit:
+                value_and_grad = jax.jit(value_and_grad)
+            actual, gradient = value_and_grad(values)
+            host = np.asarray(values, dtype=np.float64)
+            expected = np.logaddexp(0.0, host).sum()
+            # Stable sigmoid, including both saturated tails and its derivative at zero.
+            expected_grad = np.exp(-np.logaddexp(0.0, -host))
+            chex.assert_trees_all_close(actual, expected, rtol=1e-6)
+            chex.assert_trees_all_close(gradient, expected_grad, atol=1e-7, rtol=1e-6)
+
+    @parameterized.product(
+        dtype=[jnp.float32, jnp.float64], use_jit=[False, True], pytree=[False, True]
+    )
+    def test_accept_improving_proposal_with_large_gradient(
+        self, dtype, use_jit, pytree
+    ):
+        with jax.enable_x64(dtype == jnp.float64):
+            # A finite Gaussian state can have logistic corrections beyond exp's range.
+            # Use a larger initial position in float64 to exercise that dtype's range too.
+            initial = 20.0 if dtype == jnp.float32 else 60.0
+            position = jnp.array([initial], dtype=dtype)
+            if pytree:
+                position = {"x": position}
+            logdensity = lambda x: -0.5 * sum(jnp.sum(v**2) for v in jax.tree.leaves(x))
+            algorithm = blackjax.barker(logdensity, step_size=initial / 2)
+            state = algorithm.init(position)
+            step = jax.jit(algorithm.step) if use_jit else algorithm.step
+            new_state, info = step(jax.random.key(2), state)
+            proposed = float(jax.tree.leaves(info.proposal.position)[0][0])
+            delta = proposed - initial
+            # Independent Gaussian target and forward/reverse Barker proposal ratio.
+            log_accept = (
+                0.5 * (initial**2 - proposed**2)
+                + np.logaddexp(0.0, initial * delta)
+                - np.logaddexp(0.0, -proposed * delta)
+            )
+            self.assertGreater(log_accept, 0.0)
+            self.assertEqual(float(info.acceptance_rate), 1.0)
+            self.assertTrue(bool(info.is_accepted))
+            chex.assert_trees_all_equal(new_state.position, info.proposal.position)
 
 
 if __name__ == "__main__":
