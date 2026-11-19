@@ -117,9 +117,7 @@ class TestPriorChord(parameterized.TestCase):
         chex.assert_trees_all_equal(
             info.final_chain_loglikelihood, particles.loglikelihood
         )
-        chex.assert_trees_all_equal(
-            particles.loglikelihood_birth, jnp.full((4,), 0.25)
-        )
+        chex.assert_trees_all_equal(particles.loglikelihood_birth, jnp.full((4,), 0.25))
 
         _, empty_info = update(2, 1.0)
         self.assertEqual(int(empty_info.survivor_count), 0)

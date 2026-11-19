@@ -42,7 +42,7 @@ jobs:
       id-token: write  # lets codecov-action request an OIDC token for the upload
     strategy:
       matrix:
-        python-version: ['3.13', '3.14']
+        python-version: ['3.11', '3.12', '3.13', '3.14']
     steps:
     - uses: actions/checkout@v3
     - name: Set up uv
