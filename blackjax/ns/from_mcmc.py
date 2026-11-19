@@ -47,6 +47,45 @@ class ConstrainedMCMCInfo(NamedTuple):
     is_accepted: jnp.ndarray
 
 
+def _run_mcmc_chains(
+    step_fn,
+    num_mcmc_steps,
+    sample_keys,
+    start_state,
+    replacement_chunks=1,
+):
+    """Run independent replacement chains and keep their final states and info."""
+
+    def one_chain(key, state):
+        keys = random.split(key, num_mcmc_steps)
+
+        def body(state, key):
+            return step_fn(key, state)
+
+        return jax.lax.scan(body, state, keys)
+
+    run_batch = jax.vmap(one_chain)
+    if replacement_chunks == 1:
+        return run_batch(sample_keys, start_state)
+
+    # Split only the execution; keys and start states were assigned globally.
+    num_delete = sample_keys.shape[0]
+    chunk_size = num_delete // replacement_chunks
+
+    def as_chunks(x):
+        return x.reshape((replacement_chunks, chunk_size) + x.shape[1:])
+
+    def run_chunk(inputs):
+        return run_batch(*inputs)
+
+    states, infos = jax.lax.map(
+        run_chunk, (as_chunks(sample_keys), jax.tree.map(as_chunks, start_state))
+    )
+    return jax.tree.map(
+        lambda x: x.reshape((num_delete,) + x.shape[2:]), (states, infos)
+    )
+
+
 def update_with_mcmc_take_last(
     constrained_mcmc_step_fn,
     num_mcmc_steps,
@@ -94,18 +133,10 @@ def update_with_mcmc_take_last(
             **step_parameters,
         )
 
-        def mcmc_kernel(rng_key, state):
-            keys = random.split(rng_key, num_mcmc_steps)
-
-            def body_fn(state, rng_key):
-                new_state, info = shared_mcmc_step_fn(rng_key, state)
-                return new_state, info
-
-            final_state, infos = jax.lax.scan(body_fn, state, keys)
-            return final_state, infos
-
         sample_keys = random.split(sample_key, num_delete)
-        new_particles, infos = jax.vmap(mcmc_kernel)(sample_keys, start_state)
+        new_particles, infos = _run_mcmc_chains(
+            shared_mcmc_step_fn, num_mcmc_steps, sample_keys, start_state
+        )
         new_particles = new_particles._replace(
             loglikelihood_birth=jnp.full_like(
                 new_particles.loglikelihood_birth, loglikelihood_0
