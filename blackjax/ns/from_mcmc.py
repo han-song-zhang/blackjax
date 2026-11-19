@@ -53,6 +53,8 @@ def update_with_mcmc_take_last(
     constrained_mcmc_step_fn,
     num_mcmc_steps,
     num_delete,
+    *,
+    batch_size: int = 0,
 ):
     """An update strategy for NS that uses MCMC to update the particles.
     For now we will not keep the states as they will be too large to store.
@@ -66,6 +68,10 @@ def update_with_mcmc_take_last(
         Number of MCMC proposals per particle.
     num_delete
         Number of particles to replace per step.
+    batch_size
+        Maximum number of replacement chains run together. The default of 0
+        runs all chains together. Batching does not change the assignments of
+        starting particles or random keys.
 
     Returns
     -------
@@ -73,6 +79,8 @@ def update_with_mcmc_take_last(
     MCMC kernel from survivor start points and returns the final states and
     infos.
     """
+    if batch_size < 0:
+        raise ValueError("batch_size must be nonnegative")
 
     def update_function(rng_key, state, loglikelihood_0, **step_parameters):
         choice_key, sample_key = random.split(rng_key)
@@ -107,7 +115,14 @@ def update_with_mcmc_take_last(
             return final_state, infos
 
         sample_keys = random.split(sample_key, num_delete)
-        new_particles, infos = jax.vmap(mcmc_kernel)(sample_keys, start_state)
+        if 0 < batch_size < num_delete:
+            new_particles, infos = jax.lax.map(
+                lambda inputs: mcmc_kernel(*inputs),
+                (sample_keys, start_state),
+                batch_size=batch_size,
+            )
+        else:
+            new_particles, infos = jax.vmap(mcmc_kernel)(sample_keys, start_state)
         new_particles = new_particles._replace(
             loglikelihood_birth=jnp.full_like(
                 new_particles.loglikelihood_birth, loglikelihood_0

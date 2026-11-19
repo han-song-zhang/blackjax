@@ -90,6 +90,36 @@ class TestReplacementBirthContour(parameterized.TestCase):
         )
 
 
+class TestReplacementBatching(parameterized.TestCase):
+    @parameterized.parameters((1, 1.0), (2, 1.0), (5, 1.0), (2, 8.0))
+    def test_batched_and_unbatched_replacements(self, batch_size, contour):
+        """Include a partial last batch and a contour without strict survivors."""
+        values = jnp.arange(8, dtype=float)
+        state = base.NSState(
+            base.StateWithLogLikelihood(
+                values[:, None],
+                jnp.zeros_like(values),
+                values,
+                jnp.full_like(values, -jnp.inf),
+            )
+        )
+
+        def move(key, particle, loglikelihood_0):
+            del loglikelihood_0
+            delta = jax.random.randint(key, (), 0, 4).astype(values.dtype)
+            new_position = particle.position + delta
+            return particle._replace(position=new_position), jax.random.key_data(key)
+
+        def run(update):
+            return jax.jit(update)(jax.random.key(1), state, jnp.asarray(contour))
+
+        unbatched = from_mcmc.update_with_mcmc_take_last(move, 3, 5)
+        batched = from_mcmc.update_with_mcmc_take_last(move, 3, 5, batch_size=batch_size)
+        particles, info = run(batched)
+        chex.assert_trees_all_equal((particles, info), run(unbatched))
+        chex.assert_trees_all_equal(particles.loglikelihood_birth, jnp.full(5, contour))
+
+
 def make_init_state_fn(logprior_fn, loglikelihood_fn):
     """Helper to create init_state_fn from logprior and loglikelihood functions."""
     return functools.partial(
