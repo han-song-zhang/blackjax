@@ -114,7 +114,9 @@ class TestReplacementBatching(parameterized.TestCase):
             return jax.jit(update)(jax.random.key(1), state, jnp.asarray(contour))
 
         unbatched = from_mcmc.update_with_mcmc_take_last(move, 3, 5)
-        batched = from_mcmc.update_with_mcmc_take_last(move, 3, 5, batch_size=batch_size)
+        batched = from_mcmc.update_with_mcmc_take_last(
+            move, 3, 5, batch_size=batch_size
+        )
         particles, info = run(batched)
         chex.assert_trees_all_equal((particles, info), run(unbatched))
         chex.assert_trees_all_equal(particles.loglikelihood_birth, jnp.full(5, contour))
